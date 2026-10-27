@@ -1,0 +1,33 @@
+# build output
+/out/
+*.class
+/sfus.jar
+
+# runtime logs (these grow to tens of megabytes in a session)
+*.log
+*.err
+/aiout*.txt
+/aierr*.txt
+/live*.log
+
+# scratch
+/patch*.py
+*.tmp
+
+# editors / os
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# python
+__pycache__/
+*.pyc
+
+# local secrets
+.env
+blocks.local.txt
+
+# assistant workspace data (notes, caches) - never part of the project
+.workbuddy-ai/

@@ -1,0 +1,18 @@
+[Unit]
+Description=sfus Minecraft chat bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sfus
+WorkingDirectory=/opt/sfus
+EnvironmentFile=/etc/sfus.env
+ExecStart=/usr/bin/java -Xms128m -Xmx512m -jar /opt/sfus/sfus.jar $BOT_USERNAME $BOT_HOST $BOT_PORT $BOT_PASSWORD $OLLAMA_API_KEY
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/sfus/bot.log
+StandardError=append:/var/log/sfus/bot.err
+
+[Install]
+WantedBy=multi-user.target
