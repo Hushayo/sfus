@@ -9,7 +9,7 @@ package mcbot.net;
  * modules (health, damage, combat, containers) are collected here and can be
  * overridden at runtime without recompiling:
  *
- *   java -Dmcbot.packet.set_health=0x5B -Dmcbot.packet.interact=0x36 ...
+ *   java -Dmcbot.packet.entity_status=0x1D -Dmcbot.packet.interact=0x36 ...
  *
  * Values accept decimal or 0x-prefixed hex (Integer.getInteger decodes both).
  * Run with BOT_DEBUG=1 to log every inbound packet id and length, which is how
