@@ -38,6 +38,13 @@ public class LookModule implements BotModule {
     private static final long IDLE_AFTER_MS = 6_000L;
     private static final long SEND_INTERVAL_MS = 90L;
     private static final long HEARTBEAT_MS = 1_000L;
+    /**
+     * A player who stares at the bot keeps the ray hit alive every tick. Log it
+     * once per new watcher and then at most every 15 s, otherwise a single
+     * person looking at the bot writes a line per second for as long as they
+     * look - which is how a 28 MB log happens.
+     */
+    private static final long WATCH_LOG_INTERVAL_MS = 15_000L;
 
     private final Random random = new Random();
 
@@ -57,7 +64,8 @@ public class LookModule implements BotModule {
     private float targetPitch;
     private boolean primed = false;
     private long nextWanderMs = 0L;
-    private long lastPoseSeenMs = 0L;
+    private volatile java.util.UUID lastLoggedWatcher = null;
+    private volatile long lastWatcherLogMs = 0L;
 
     @Override
     public void install(MinecraftBot bot) {
@@ -139,8 +147,10 @@ public class LookModule implements BotModule {
                 maxStep = WATCH_TURN_PER_TICK;
                 watching = true;
                 lastInteractionMs = now; // being looked at counts as attention
-                if (now - lastPoseSeenMs > 1500L) {
-                    lastPoseSeenMs = now;
+                if (watcher.uuid == null || !watcher.uuid.equals(lastLoggedWatcher)
+                        || now - lastWatcherLogMs > WATCH_LOG_INTERVAL_MS) {
+                    lastLoggedWatcher = watcher.uuid;
+                    lastWatcherLogMs = now;
                     System.out.println("[look] " + watcher.uuid + " is looking at me, looking back");
                 }
             }
