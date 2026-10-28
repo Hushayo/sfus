@@ -155,7 +155,7 @@ public final class OllamaClient {
                             result = "No results found.";
                         } else {
                             log.accept("model asked to web search: " + query);
-                            String found = webSearch(key, query);
+                            String found = webSearch(query);
                             result = (found == null || found.isEmpty()) ? "No results found." : found;
                             log.accept("web results: " + abbreviate(result));
                         }
@@ -282,22 +282,25 @@ public final class OllamaClient {
         return c.getClass().getSimpleName() + (msg == null || msg.isEmpty() ? "" : ": " + msg);
     }
 
-    /** Search entry point: DuckDuckGo HTML (no key, ~3 s), ollama.com as fallback. */
+    /** Search entry point: DuckDuckGo HTML (no key, ~3 s), then Wikipedia. */
     private static volatile long ddgBlockedUntil = 0L;
 
     /**
-     * Search chain: DuckDuckGo HTML (good for current events), then Wikipedia
-     * (fast, no key, no quota), then ollama.com (free tier has an hourly limit).
+     * Free sources only.
+     *
+     * The previous chain ended in ollama.com/api/web_search, which bills per
+     * call. That fallback is gone: if DuckDuckGo is rate limited and Wikipedia
+     * has no article, the tool honestly reports no results instead of spending
+     * money. Neither remaining source takes an API key or has a quota.
      */
-    public static String webSearch(String apiKey, String query) {
+    public static String webSearch(String query) {
         if (System.currentTimeMillis() >= ddgBlockedUntil) {
             String ddg = duckDuckGoSearch(query);
             if (ddg != null && !ddg.isEmpty()) return ddg;
         }
         String wiki = wikipediaSearch(query);
         if (wiki != null && !wiki.isEmpty()) return wiki;
-        System.out.println("[ai] wikipedia empty, falling back to ollama web_search");
-        return ollamaSearch(apiKey, query);
+        return null;
     }
 
     private static String duckDuckGoSearch(String query) {
@@ -447,43 +450,6 @@ public final class OllamaClient {
             }
         }
         return out;
-    }
-
-    private static String ollamaSearch(String apiKey, String query) {
-        String key = resolveKey(apiKey);
-        if (key == null) return null;
-        try {
-            String json = "{\"query\":\"" + escape(query) + "\"}";
-            HttpRequest req = HttpRequest.newBuilder(URI.create("https://ollama.com/api/web_search"))
-                    .timeout(Duration.ofSeconds(WEB_TIMEOUT_SEC))
-                    .header("Authorization", "Bearer " + key)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json))
-                    .build();
-            HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() != 200) {
-                System.out.println("[ai] web search http " + res.statusCode() + ": " + abbreviate(res.body()));
-                return null;
-            }
-            List<String> titles = new ArrayList<>();
-            List<String> contents = new ArrayList<>();
-            for (String[] kv : stringFields(res.body(), "title", "content")) {
-                if (kv[0].equals("title")) titles.add(kv[1]);
-                else contents.add(kv[1]);
-            }
-            int n = Math.min(titles.size(), contents.size());
-            if (n == 0) return null;
-            StringBuilder out = new StringBuilder();
-            for (int r = 0; r < Math.min(n, 4); r++) {
-                String c = contents.get(r);
-                if (c.length() > 220) c = c.substring(0, 220);
-                out.append("- ").append(titles.get(r)).append(": ").append(c).append("\n");
-            }
-            return out.toString().trim();
-        } catch (Exception e) {
-            System.out.println("[ai] web search error: " + e);
-            return null;
-        }
     }
 
     private static String abbreviate(String s) {

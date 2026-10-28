@@ -145,6 +145,11 @@ The chat model can call: `come_to_player`, `walk_to_coordinates`, `stop_walking`
 `attack_nearest`, `use_block`, `web_search`. The deterministic commands above are handled
 before the model ever sees the message.
 
+`web_search` uses DuckDuckGo's HTML endpoint and Wikipedia — both free, key-less and
+quota-free. There is deliberately **no paid search fallback**: if both miss, the tool
+returns "no results" rather than billing an API call. The only metered call the bot makes
+is the chat completion itself.
+
 ## Block name table (optional)
 
 The protocol sends block *state ids*. To get names, drop a dump next to the jar:
