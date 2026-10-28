@@ -46,6 +46,7 @@ public class SurvivalModule implements BotModule {
     private volatile long lastEatMs = 0L;
     private volatile boolean retreating = false;
     private volatile String attackerName = null;
+    private volatile boolean healthKnown = false;
 
     @Override
     public void install(MinecraftBot bot) {
@@ -90,6 +91,17 @@ public class SurvivalModule implements BotModule {
             float health = pr.readFloat();
             int food = pr.readVarInt();
             float saturation = pr.readFloat();
+            if (!healthKnown) {
+                // The first health packet describes the state we are joining
+                // with. Comparing it against the default 20 made every login
+                // look like "lost 1 hp" and opened a phantom combat window.
+                healthKnown = true;
+                bot.health = health;
+                bot.food = food;
+                bot.saturation = saturation;
+                if (health > 0) bot.dead = false;
+                return;
+            }
             float before = bot.health;
             bot.health = health;
             bot.food = food;
@@ -213,6 +225,14 @@ public class SurvivalModule implements BotModule {
                 System.out.println("[survival] attacked by a player, pvp disabled -> fleeing");
                 retreating = true;
             }
+        }
+
+        // Without a verified attack packet the bot cannot win a fight, so it
+        // should not stand in reach taking hits. Keep distance instead.
+        if (!bot.interaction.canAttack() && !retreating) {
+            retreating = true;
+            System.out.println("[survival] attack packet id unknown on this server"
+                    + " -> keeping distance instead of fighting");
         }
 
         double myX, myY, myZ;

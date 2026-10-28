@@ -61,16 +61,37 @@ public final class PacketIds {
 
     // ---- serverbound (play) -------------------------------------------------
 
-    /** swing: VarInt hand (0 = main hand). */
-    public static final int SWING = id("swing", 0x33);
-    /** interact: VarInt entityId, VarInt action (1 = attack), boolean sneaking. */
-    public static final int INTERACT = id("interact", 0x36);
+    /**
+     * swing: VarInt hand (0 = main hand). DISABLED by default - unverified, and
+     * a wrong serverbound id disconnects the bot (see INTERACT below).
+     */
+    public static final int SWING = id("swing", -1);
+    /**
+     * interact: VarInt entityId, VarInt action (1 = attack), boolean sneaking.
+     *
+     * DISABLED by default, and this one cost us a real disconnect. The guess was
+     * 0x36; sending a 4-byte interact body there made the server answer:
+     *
+     *   Packet play/serverbound/minecraft:set_carried_item was larger than I
+     *   expected, found 2 bytes extra
+     *
+     * so serverbound 0x36 is set_carried_item, not interact. The real interact
+     * id is still unknown; enable it with -Dmcbot.packet.interact=0x.. once you
+     * have evidence, and survival will fight back again.
+     */
+    public static final int INTERACT = id("interact", -1);
     /** use_item: VarInt hand, VarInt sequence, float yaw, float pitch. */
     public static final int USE_ITEM = id("use_item", 0x35);
     /** use_item_on: hand, BlockPos, face, cursor xyz, inside, sequence. */
     public static final int USE_ITEM_ON = id("use_item_on", 0x3A);
-    /** set_held_slot: VarInt slot (0..8). */
-    public static final int SET_HELD_SLOT = id("set_held_slot", 0x34);
+    /**
+     * set_held_slot: the hotbar slot as a **short** (2 bytes, not a VarInt).
+     *
+     * This id is the one piece of good news from the disconnect above: the
+     * server named 0x36 as set_carried_item, so we no longer have to guess it.
+     * The short encoding is why a 4-byte body produced "2 bytes extra".
+     */
+    public static final int SET_HELD_SLOT = id("set_held_slot", 0x36);
     /** container_click: windowId, stateId, slot, button, clickType, changed, carried. */
     public static final int CONTAINER_CLICK = id("container_click", 0x0F);
     /** container_close (serverbound): windowId. */

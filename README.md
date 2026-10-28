@@ -115,6 +115,20 @@ selection, container open/close and slot clicks. Recipe logic (which layout make
 item, and which slot sequence to click) is **not** implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
+**Status of the serverbound ids.** Sending a packet with the wrong id does not fail
+quietly — it gets the bot kicked. That happened once: a guessed `interact` at `0x36` was
+decoded by the server as `set_carried_item` and disconnected us with *"found 2 bytes
+extra"*. So the unverified serverbound packets (`interact`, `swing`, `use_item`,
+`use_item_on`, `container_click`) default to **disabled**, and survival keeps its distance
+instead of fighting. Hotbar selection is enabled: `0x36` is now a *known* id, and it takes
+a short, not a VarInt.
+
+To turn them back on once you have evidence:
+
+```
+java -Dmcbot.packet.interact=0x.. -Dmcbot.packet.use_item_on=0x.. ...
+```
+
 ## Chat commands
 
 | Command | Module |

@@ -111,10 +111,18 @@ public class InteractionModule implements BotModule {
         }
     }
 
+    /** True when the attack packet id is known, so survival can actually fight. */
+    public boolean canAttack() {
+        return PacketIds.INTERACT >= 0;
+    }
+
     /** Swings at an entity (the vanilla attack packet). */
     public String attack(int entityId) {
         MinecraftBot b = bot;
         if (b == null || entityId < 0) return "No target.";
+        if (!canAttack()) {
+            return "I can't attack: the interact packet id is unknown for this server.";
+        }
         try {
             ByteArrayOutputStream body = new ByteArrayOutputStream();
             PacketWriter.varInt(body, entityId);
@@ -128,10 +136,10 @@ public class InteractionModule implements BotModule {
         }
     }
 
-    /** Arm swing animation. */
+    /** Arm swing animation. No-op while the swing id is unverified. */
     public void swing() {
         MinecraftBot b = bot;
-        if (b == null) return;
+        if (b == null || PacketIds.SWING < 0) return;
         try {
             ByteArrayOutputStream body = new ByteArrayOutputStream();
             PacketWriter.varInt(body, HAND_MAIN);
@@ -162,14 +170,14 @@ public class InteractionModule implements BotModule {
         }
     }
 
-    /** Selects hotbar slot 0..8. */
+    /** Selects hotbar slot 0..8. Sent as a short: that is what the server expects. */
     public String selectSlot(int slot) {
         MinecraftBot b = bot;
         if (b == null) return "Not connected.";
         if (slot < 0 || slot > 8) return "Hotbar slot must be 0..8.";
         try {
             ByteArrayOutputStream body = new ByteArrayOutputStream();
-            PacketWriter.varInt(body, slot);
+            PacketWriter.shortVal(body, slot);
             b.sendPlay(PacketIds.SET_HELD_SLOT, body.toByteArray());
             heldSlot = slot;
             return "Selected hotbar slot " + slot + ".";
