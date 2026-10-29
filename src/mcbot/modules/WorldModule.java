@@ -4,6 +4,7 @@ import mcbot.bot.BotModule;
 import mcbot.bot.MinecraftBot;
 import mcbot.net.PacketReader;
 import mcbot.net.PacketWriter;
+import mcbot.util.Pos;
 import mcbot.world.Chunk;
 import mcbot.world.ChunkParser;
 
@@ -40,29 +41,54 @@ public class WorldModule implements BotModule {
                 schedulePlayerLoaded(bot);
                 break;
             }
+            case 0x05: { // block_destruction: breaker entity id, pos, destroy stage 0..9
+                PacketReader pr = new PacketReader(data);
+                int breaker = pr.readVarInt();
+                long packed = pr.readLong();
+                int stage = pr.readUnsignedByte();
+                bot.mining.onServerProgress(breaker, Pos.blockX(packed),
+                        Pos.blockY(packed), Pos.blockZ(packed), stage);
+                break;
+            }
+            case 0x2F: { // level_event: int type, pos, int data, boolean global
+                // 2019/2020 are the per-tick block-crack events the server sends
+                // for a dig it is actually ticking - at the dig position, to
+                // everyone within 64 blocks, including the digger. That is the
+                // only proof that a START was accepted: a refused break is
+                // answered with complete silence.
+                PacketReader pr = new PacketReader(data);
+                int type = pr.readInt();
+                long packed = pr.readLong();
+                pr.readInt();      // data
+                pr.readBoolean();  // global
+                if (type == 2019 || type == 2020) {
+                    bot.mining.onServerActivity(Pos.blockX(packed),
+                            Pos.blockY(packed), Pos.blockZ(packed));
+                }
+                break;
+            }
             case 0x08: { // block_update
                 PacketReader pr = new PacketReader(data);
                 long pos = pr.readLong();
-                int x = (int) (pos >> 38);
-                int y = (int) (pos << 52 >> 52);
-                int z = (int) (pos << 26 >> 38);
                 int state = pr.readVarInt();
-                bot.world.setBlock(x, y, z, state);
+                bot.world.setBlock(Pos.blockX(pos), Pos.blockY(pos), Pos.blockZ(pos), state);
                 if (MinecraftBot.DEBUG) {
-                    System.out.println("[world] block_update " + x + " " + y + " " + z + " state=" + state);
+                    System.out.println("[world] block_update " + Pos.blockX(pos) + " "
+                            + Pos.blockY(pos) + " " + Pos.blockZ(pos) + " state=" + state);
                 }
                 break;
             }
             case 0x56: { // section_blocks_update
                 PacketReader pr = new PacketReader(data);
                 long packed = pr.readLong();
-                int sectionX = (int) (packed >> 42);
-                int sectionY = (int) (packed << 44 >> 44);
-                int sectionZ = (int) (packed << 22 >> 42);
+                int sectionX = Pos.sectionX(packed);
+                int sectionY = Pos.sectionY(packed);
+                int sectionZ = Pos.sectionZ(packed);
                 int count = pr.readVarInt();
                 for (int i = 0; i < count; i++) {
                     long record = pr.readVarLong();
-                    int state = (int) (record >> 12);
+                    // SectionBlocksUpdatePacket record: state << 12 | localX << 8 | localZ << 4 | localY
+                    int state = (int) (record >>> 12);
                     int localX = (int) ((record >> 8) & 0xF);
                     int localY = (int) (record & 0xF);
                     int localZ = (int) ((record >> 4) & 0xF);
@@ -75,9 +101,7 @@ public class WorldModule implements BotModule {
             case 0x26: { // forget_level_chunk (ChunkPos packed long)
                 PacketReader pr = new PacketReader(data);
                 long packed = pr.readLong();
-                int chunkX = (int) packed;
-                int chunkZ = (int) (packed >> 32);
-                bot.world.unloadChunk(chunkX, chunkZ);
+                bot.world.unloadChunk(Pos.chunkX(packed), Pos.chunkZ(packed));
                 break;
             }
             case 0x32: { // login (play)
@@ -100,7 +124,8 @@ public class WorldModule implements BotModule {
                 loadGeneration.incrementAndGet();
                 System.out.println("[world] login dimension=" + bot.world.dimensionKey()
                         + " type=" + bot.world.dimensionType()
-                        + " minY=" + bot.world.minY() + " height=" + bot.world.height());
+                        + " minY=" + bot.world.minY() + " height=" + bot.world.height()
+                        + " entityId=" + bot.entityId);
                 break;
             }
             case 0x54: { // respawn

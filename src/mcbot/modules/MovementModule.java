@@ -72,6 +72,8 @@ public class MovementModule implements BotModule {
     private volatile boolean announced = false;
     /** Set for AI / auto-goto walks so they do not spam chat on arrival. */
     private volatile boolean quiet = false;
+    /** When true the path must end on the exact target cell (item pickup). */
+    private volatile boolean tightGoal = false;
 
     /**
      * Directed path edges the server already rejected during the current goto.
@@ -97,12 +99,14 @@ public class MovementModule implements BotModule {
     public String comeTo(UUID sender) {
         MinecraftBot b = bot;
         if (b == null) return "Not connected yet.";
+        if (sender == null) return "I need coordinates like 'goto x y z' - I can't see you.";
         double[] pos = b.entityTracker.positionOf(sender);
         if (pos == null) {
             return "I can't see that player's position; I need coordinates like 'goto x y z'.";
         }
         System.out.println("[move] ai come from " + sender + " at "
                 + pos[0] + " " + pos[1] + " " + pos[2]);
+        tightGoal = false;
         queueGoto(b, pos[0], pos[1], pos[2], true);
         return "Walking to the player at " + (int) pos[0] + " " + (int) pos[1]
                 + " " + (int) pos[2] + ".";
@@ -113,8 +117,24 @@ public class MovementModule implements BotModule {
         MinecraftBot b = bot;
         if (b == null) return "Not connected yet.";
         System.out.println("[move] ai goto " + x + " " + y + " " + z);
+        tightGoal = false;
         queueGoto(b, x, y, z, true);
         return "Walking to " + (int) x + " " + (int) y + " " + (int) z + ".";
+    }
+
+    /**
+     * Walks to a specific cell rather than "somewhere near" it.
+     *
+     * Used for picking up a dropped item, where the server's collection radius
+     * is about one block: the normal pathfinder is happy to stop two blocks away
+     * and report success, which leaves the drop on the ground forever.
+     */
+    public String goToTight(double x, double y, double z) {
+        MinecraftBot b = bot;
+        if (b == null) return "Not connected yet.";
+        tightGoal = true;
+        queueGoto(b, x, y, z, true);
+        return "Stepping to " + (int) x + " " + (int) y + " " + (int) z + ".";
     }
 
     /** AI-driven stop. Returns a short status line for the model. */
@@ -151,60 +171,14 @@ public class MovementModule implements BotModule {
 
     @Override
     public void onPlayPacket(int packetId, byte[] data, MinecraftBot bot) throws Exception {
+        // Movement is driven by intents (ChatCommands -> jobs) and by the AI
+        // tool layer, not by chat parsing here. The only thing this module
+        // watches for itself is the one-shot BOT_GOTO environment command,
+        // which exists so a freshly spawned bot can walk somewhere on its own.
         maybeScheduleAutoGoto(bot);
-
-        if (packetId != 0x42) return; // ClientboundPlayerChatPacket
-
-        PacketReader pr = new PacketReader(data);
-        pr.readVarInt(); // global index
-        UUID sender = pr.readUUID();
-        pr.readVarInt(); // index
-        boolean hasSigBytes = pr.readByte() != 0;
-        if (hasSigBytes) pr.readBytes(256);
-        String message = pr.readString();
-        if (message == null || message.isBlank()) return;
-        if (sender.equals(bot.uuid)) return;
-        bot.knownPlayers.add(sender);
-
-        String text = message.trim();
-        String lower = text.toLowerCase(Locale.ROOT);
-        if (isMovementCommand(text)) {
-            System.out.println("[move] command from " + sender + ": " + text);
-        }
-        if (lower.equals("stop") || lower.equals("cancel")
-                || lower.equals("stop pathing") || lower.equals("stop moving")) {
-            stop();
-            bot.sendChat("Stopped.");
-            return;
-        }
-        if (lower.equals("come") || lower.equals("come here")) {
-            double[] pos = bot.entityTracker.positionOf(sender);
-            if (pos == null) {
-                bot.sendChat("I can't see you. Give me coordinates: goto x y z");
-                return;
-            }
-            System.out.println("[move] come from " + sender + " at "
-                    + pos[0] + " " + pos[1] + " " + pos[2]);
-            bot.sendChat("Coming to you.");
-            queueGoto(bot, pos[0], pos[1], pos[2], false);
-            return;
-        }
-
-        Matcher m = GOTO.matcher(text);
-        if (!m.find()) return;
-        double tx = Double.parseDouble(m.group(1));
-        double ty;
-        double tz;
-        if (m.group(3) != null) {
-            ty = Double.parseDouble(m.group(2));
-            tz = Double.parseDouble(m.group(3));
-        } else {
-            ty = currentY(bot);
-            tz = Double.parseDouble(m.group(2));
-        }
-        queueGoto(bot, tx, ty, tz, false);
     }
 
+    /** Retained for the AI tool layer, which wants to know if a text is a walk request. */
     public static boolean isMovementCommand(String message) {
         if (message == null) return false;
         String lower = message.trim().toLowerCase(Locale.ROOT);
@@ -315,8 +289,9 @@ public class MovementModule implements BotModule {
                     teleports = bot.teleportCounter;
                 }
 
-                Pathfinder.Result result = Pathfinder.findPath(bot.world,
-                        px, py, pz, tx, ty, tz, blockedEdges);
+                Pathfinder.Result result = tightGoal
+                        ? Pathfinder.findPathTight(bot.world, px, py, pz, tx, ty, tz, blockedEdges)
+                        : Pathfinder.findPath(bot.world, px, py, pz, tx, ty, tz, blockedEdges);
                 if (gen != generation) return;
 
                 if (result.ok()) {
@@ -419,7 +394,7 @@ public class MovementModule implements BotModule {
             }
 
             int jumpDist = Math.abs(node.x - prev.x) + Math.abs(node.z - prev.z);
-            if (jumpDist > 1) {
+            if (jumpDist > 1 || node.y > prev.y) {
                 // Jump edge. Settle on the takeoff block centre first (the jump
                 // arc is scripted from there), then run the arc.
                 double pcx = prev.x + 0.5;
@@ -454,6 +429,11 @@ public class MovementModule implements BotModule {
             double dz = cz - z;
             double dy = node.y - y;
             double horizontal = Math.hypot(dx, dz);
+
+            // The pathfinder routes through doors, so somebody has to open them.
+            // Without this the bot walks into a shut door and the server just
+            // refuses the step, which reads as "no path" to everything after.
+            openDoorIfNeeded(bot, node.x, node.y, node.z);
 
             if (horizontal < EPS && Math.abs(dy) < EPS) {
                 if (!sendStep(bot, cx, node.y, cz, yaw, pitch, true, lastTeleports)) {
@@ -583,40 +563,73 @@ public class MovementModule implements BotModule {
     }
 
     /**
-     * Runs one scripted jump arc from {@code prev} to {@code node} (a jump edge,
-     * 2..MAX_JUMP blocks away). The arc is a parabola with apex {@link #JUMP_APEX}
-     * and a fixed horizontal speed, at least {@link #JUMP_MIN_TICKS} ticks long.
+     * Runs one jump arc from {@code prev} to {@code node}.
+     *
+     * The arc is integrated the way vanilla does it, not drawn as a symmetric
+     * parabola: the jump starts at vy = 0.42 and each tick applies
+     * {@code vy = (vy - 0.08) * 0.98}. That rise-then-fall shape is why a jump
+     * covers about 2.4 blocks in 12 ticks, and why the old fixed parabola kept
+     * landing short - the server simulated the real curve, disagreed with the
+     * reported position, and sent a correction that forced a replan.
+     *
      * Returns true when the server corrected our position and the path must be
      * recomputed.
      */
     private boolean jumpTo(MinecraftBot bot, Pathfinder.Node prev, Pathfinder.Node node,
                            float yaw, long expectedTeleports, long gen) throws Exception {
-        // max axis distance: a diagonal covering N blocks per axis is N,
-        // not 2*N, so the horizontal speed stays at ~0.25 blocks/tick.
-        int dist = Math.max(Math.abs(node.x - prev.x), Math.abs(node.z - prev.z));
-        int ticks = Math.max(JUMP_MIN_TICKS, JUMP_TICKS_PER_BLOCK * dist);
         double x0 = prev.x + 0.5;
         double z0 = prev.z + 0.5;
         double y0 = prev.y;
         double x1 = node.x + 0.5;
         double z1 = node.z + 0.5;
         double y1 = node.y;
+
+        // Integrate the vertical arc first to find the airtime and the height
+        // for each tick. Vanilla order: move by the velocity, then apply
+        // gravity to it. Doing it the other way round loses the first tick's
+        // full rise and tops the arc out at 0.83 blocks - below the block a
+        // step-up is trying to climb, so every climb landed short.
+        double[] arcY = new double[40];
+        double vy = 0.42;
+        double sy = y0;
+        double clearAt = Math.max(y0, y1) + 0.05;
+        int riseTicks = 0;
+        int airtime = 0;
+        for (int t = 1; t <= 39; t++) {
+            sy += vy;
+            vy = (vy - 0.08) * 0.98;
+            arcY[t] = sy;
+            if (riseTicks == 0 && sy >= clearAt) riseTicks = t;
+            if (riseTicks > 0 && vy < 0 && sy <= y1) {
+                airtime = t;
+                break;
+            }
+        }
+        if (airtime == 0) airtime = 12;
+        if (riseTicks == 0 || riseTicks >= airtime) riseTicks = Math.max(1, airtime / 3);
+        int moveTicks = Math.max(1, airtime - riseTicks);
+
         float jumpYaw = yawTo(x1 - x0, z1 - z0, yaw);
-        System.out.println("[move] jump " + dist + "x" + (Math.abs(node.z - prev.z))
-                + " blocks -> " + node.x + " " + node.y + " " + node.z + " over " + ticks + " ticks");
+        System.out.println("[move] jump " + Math.abs(node.x - prev.x) + "x"
+                + Math.abs(node.z - prev.z) + " dy=" + (int) Math.round(y1 - y0)
+                + " -> " + node.x + " " + node.y + " " + node.z
+                + " over " + airtime + " ticks");
 
         try {
             bot.sendInput(MinecraftBot.INPUT_FORWARD | MinecraftBot.INPUT_JUMP);
         } catch (Exception ignored) {}
         try {
-            for (int i = 1; i <= ticks; i++) {
+            for (int i = 1; i <= airtime; i++) {
                 if (gen != generation) return false;
-                boolean last = i == ticks;
-                double t = (double) i / ticks;
+                boolean last = i == airtime;
+                // Rise in place until the feet are above both the takeoff and
+                // the landing level, and only then travel sideways: moving
+                // diagonally through the corner of the block being climbed is
+                // what the server's collision check rejects.
+                double t = i <= riseTicks ? 0.0 : (double) (i - riseTicks) / moveTicks;
                 double nx = x0 + (x1 - x0) * t;
                 double nz = z0 + (z1 - z0) * t;
-                double ny = last ? y1
-                        : y0 + (y1 - y0) * t + JUMP_APEX * 4.0 * t * (1.0 - t);
+                double ny = last ? y1 : arcY[i];
                 float pitch;
                 synchronized (bot.positionLock) {
                     pitch = bot.playerPitch;
@@ -638,6 +651,36 @@ public class MovementModule implements BotModule {
         }
         return false;
     }
+
+    /**
+     * Right-clicks a shut door or fence gate the path is about to walk through.
+     *
+     * The pathfinder treats closed doors as traversable because a player would
+     * simply open one. That only works if the movement actually opens it: a shut
+     * door is a solid block, so the step is refused by the server and the bot
+     * looks stuck against a wall it decided to walk into.
+     */
+    private void openDoorIfNeeded(MinecraftBot bot, int x, int y, int z) {
+        if (bot.interaction == null || !bot.hasPlayerPosition) return;
+        int feet = bot.world.getBlock(x, y, z);
+        if (!isShutDoor(feet)) return;
+        if (!bot.interaction.inReach(x, y, z)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastDoorMs < 600L) return;
+        lastDoorMs = now;
+        System.out.println("[move] opening door at " + x + " " + y + " " + z);
+        bot.interaction.useBlock(x, y, z);
+    }
+
+    private static boolean isShutDoor(int state) {
+        String name = mcbot.registry.Blocks.shortName(state);
+        if (name == null) return false;
+        if (!name.endsWith("_door") && !name.endsWith("_fence_gate")) return false;
+        if (name.startsWith("iron_")) return false;
+        return !mcbot.registry.Blocks.hasProperty(state, "open", "true");
+    }
+
+    private volatile long lastDoorMs = 0L;
 
     /**
      * Writes the new position and sends move_player_pos_rot + client_tick_end.

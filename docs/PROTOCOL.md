@@ -12,8 +12,8 @@ traffic, not from memory.
 Tool: `tools/pktstat.py` (read-only with respect to `src/`).
 
 ```bash
-python tools/pktstat.py analyze live2.log --state PLAY --top 25   # what arrives
-python tools/pktstat.py burst  live2.log --n 24                   # join fingerprint
+python tools/pktstat.py analyze logs/bot.log --state PLAY --top 25   # what arrives
+python tools/pktstat.py burst  logs/bot.log --n 24                   # join fingerprint
 python tools/pktstat.py ids                                       # what the code claims
 python tools/pktstat.py probe  --host 51.195.191.92 --port 10679 --out capture.log
 ```
@@ -39,7 +39,7 @@ python tools/pktstat.py probe --host 127.0.0.1 --port 25599 --seconds 4
 
 | | |
 |---|---|
-| Capture | `live2.log` |
+| Capture | `logs/bot.log` (`BOT_DEBUG=1`); counts below are from the original capture |
 | Sessions | 1 complete login (LOGIN -> CONFIG -> PLAY) |
 | Inbound packets | 516,866 |
 | Distinct ids in PLAY | 57 |
@@ -168,11 +168,11 @@ build moved and every id in this document must be re-derived.
 
 ## Re-deriving after a server upgrade
 
-1. `BOT_DEBUG=1 java -cp out mcbot.Main ...` for one session, or
-   `pktstat.py probe --out capture.log`.
-2. `pktstat.py analyze capture.log --state PLAY` — compare against the tables
+1. `BOT_DEBUG=1 java -cp out mcbot.Main ...` for one session (it writes
+   `logs/bot.log`), or `pktstat.py probe --out logs/probe.log`.
+2. `pktstat.py analyze logs/bot.log --state PLAY` — compare against the tables
    above; a changed `login`/`chunk`/`keep_alive` size means ids shifted.
-3. `pktstat.py burst capture.log --n 24` — diff against the fingerprint.
+3. `pktstat.py burst logs/bot.log --n 24` — diff against the fingerprint.
 4. Only then update `PacketIds.java`, and prefer `-Dmcbot.packet.<name>=0x..`
    over a recompile while you are still guessing.
 

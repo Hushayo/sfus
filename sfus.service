@@ -11,8 +11,10 @@ EnvironmentFile=/etc/sfus.env
 ExecStart=/usr/bin/java -Xms128m -Xmx512m -jar /opt/sfus/sfus.jar $BOT_USERNAME $BOT_HOST $BOT_PORT $BOT_PASSWORD $OLLAMA_API_KEY
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/sfus/bot.log
-StandardError=append:/var/log/sfus/bot.err
+StandardOutput=journal
+StandardError=journal
+Environment=BOT_LOG=/var/log/sfus/bot.log
+Environment=BOT_LOG_APPEND=1
 
 [Install]
 WantedBy=multi-user.target

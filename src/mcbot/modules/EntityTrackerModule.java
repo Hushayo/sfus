@@ -156,6 +156,12 @@ public class EntityTrackerModule implements BotModule {
         return out;
     }
 
+    /** Copy of one entity by UUID, or null when it is not in range. */
+    public synchronized Pose poseByUuid(UUID uuid) {
+        TrackedEntity e = byUuid.get(uuid);
+        return e == null ? null : new Pose(e);
+    }
+
     /** Copy of one entity by id, or null when it is not in range. */
     public synchronized Pose pose(int id) {
         TrackedEntity e = byId.get(id);
@@ -186,6 +192,30 @@ public class EntityTrackerModule implements BotModule {
 
     public synchronized int trackedCount() {
         return byId.size();
+    }
+
+    /**
+     * Nearest dropped item to a point, or null when none is in range.
+     *
+     * Drops are real entities with real positions, so this is ground truth:
+     * the alternative is to walk to where the block used to be and hope the
+     * item did not bounce off a slope on the way down.
+     */
+    public synchronized Pose nearestItem(double x, double y, double z, double radius) {
+        Pose best = null;
+        double bestDist = radius * radius;
+        for (TrackedEntity e : byId.values()) {
+            if (!mcbot.registry.Entities.isDroppedItem(e.type)) continue;
+            double dx = e.x - x;
+            double dy = e.y - y;
+            double dz = e.z - z;
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d <= bestDist) {
+                bestDist = d;
+                best = new Pose(e);
+            }
+        }
+        return best;
     }
 
     private void clear() {
@@ -221,15 +251,12 @@ public class EntityTrackerModule implements BotModule {
     }
 
     /**
-     * LpVec3.read: a zero byte means Vec3.ZERO; otherwise two bytes plus a
-     * 4-byte uint, and an extra VarInt when the low byte's bit 2 is set.
+     * LpVec3: a zero byte means Vec3.ZERO, otherwise a packed 48-bit vector.
+     * The decoder lives in {@link mcbot.net.LpVec3Codec} so this module and
+     * the motion handler cannot drift apart.
      */
     private static void skipLpVec3(PacketReader pr) {
-        int b0 = pr.readUnsignedByte();
-        if (b0 == 0) return;
-        pr.readUnsignedByte();
-        pr.readInt();
-        if ((b0 & 4) != 0) pr.readVarInt();
+        mcbot.net.LpVec3Codec.skip(pr);
     }
 
     private void handlePositionSync(byte[] data) {

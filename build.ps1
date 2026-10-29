@@ -23,6 +23,14 @@ $files = Get-ChildItem $src -Recurse -Filter "*.java" | Select-Object -ExpandPro
 & $javac -d $out $files
 if ($LASTEXITCODE -ne 0) { Write-Host "Build failed"; exit $LASTEXITCODE }
 
+# The registry tables under src/mcbot/data are classpath resources, not
+# compiled classes. Without this copy the jar loads zero blocks and the bot
+# "works" while knowing nothing - the exact trap build.sh already documents.
+$dataSrc = Join-Path $src "mcbot\data"
+$dataOut = Join-Path $out "mcbot\data"
+if (Test-Path $dataOut) { Remove-Item -Recurse -Force $dataOut }
+Copy-Item -Recurse -Force $dataSrc $dataOut
+
 & $jarTool --create --file $jar --main-class mcbot.Main -C $out .
 if ($LASTEXITCODE -ne 0) { Write-Host "Jar failed"; exit $LASTEXITCODE }
 

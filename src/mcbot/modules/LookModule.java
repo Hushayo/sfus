@@ -112,6 +112,19 @@ public class LookModule implements BotModule {
             primed = true;
             return;
         }
+        if (bot.jobs.busy() || bot.mining.isMining()) {
+            // A job owns the body while it runs. Idle gaze used to keep sending
+            // position+rotation packets during a dig, and a rotation change mid
+            // dig makes the server restart the block's destroy progress - the
+            // bot looked like it had no strength and kept re-starting the same
+            // block.
+            synchronized (bot.positionLock) {
+                gazeYaw = bot.playerYaw;
+                gazePitch = bot.playerPitch;
+            }
+            primed = true;
+            return;
+        }
 
         long now = System.currentTimeMillis();
         if (!primed) {

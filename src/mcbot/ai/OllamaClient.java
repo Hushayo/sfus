@@ -12,10 +12,25 @@ public final class OllamaClient {
     /**
      * No key is compiled in. This repository is public, and a committed key is a
      * leaked key. Provide one of:
-     *   5th command line argument, OLLAMA_API_KEY, or -Dmcbot.ollama.key=...
-     * Chat and web search simply stay disabled when none is present.
+     *   5th command line argument, OLLAMA_API_KEY, -Dmcbot.ollama.key=...,
+     *   an ollama.key file, or (Windows) the User environment in the registry.
+     *
+     * The last two exist because {@code OLLAMA_API_KEY} is read from the
+     * *process* environment, not from wherever it is configured. A bot launched
+     * from a terminal that was already open when the variable was set (setx, the
+     * Environment Variables dialog, System Properties) inherits the old
+     * environment block, sees nothing, and answers "chat is disabled" while the
+     * key is plainly set. Reading the registry and a key file makes the process
+     * find it anyway. Chat and web search stay disabled only when all of the
+     * above miss.
      */
     public static final String DEFAULT_KEY = "";
+    /** Process environment variable, then Windows user environment, both checked. */
+    public static final String KEY_ENV = "OLLAMA_API_KEY";
+    /** Optional override: -Dmcbot.ollama.keyfile=C:\path\to\key. */
+    public static final String KEY_FILE_PROP = "mcbot.ollama.keyfile";
+    /** Files checked when nothing else has the key, in this order. */
+    private static final String[] KEY_FILES = {"ollama.key", "data/ollama.key"};
     public static final String MODEL = "beam:cloud";
     public static final long MEMORY_WINDOW_MS = 24L * 60 * 60 * 1000;
     public static final int WEB_TIMEOUT_SEC = 8;
@@ -30,13 +45,131 @@ public final class OllamaClient {
 
     private OllamaClient() {}
 
-    /** First non-empty key from argument, environment, then system property. */
+    /** Cached once found: the registry lookup shells out, so it is done at most once. */
+    private static volatile String cachedKey = null;
+
+    /**
+     * First non-empty key from argument, process environment, system property,
+     * key file, then the Windows user environment in the registry.
+     *
+     * A miss is not cached, so dropping an {@code ollama.key} next to the jar
+     * starts answering chat without a restart.
+     */
     public static String resolveKey(String apiKey) {
-        if (apiKey != null && !apiKey.isEmpty()) return apiKey;
-        String env = System.getenv("OLLAMA_API_KEY");
-        if (env != null && !env.isEmpty()) return env;
-        String prop = System.getProperty("mcbot.ollama.key");
-        if (prop != null && !prop.isEmpty()) return prop;
+        if (cachedKey != null) return cachedKey;
+        String[] found = findKey(apiKey);
+        if (found == null) return null;
+        cachedKey = found[0];
+        return cachedKey;
+    }
+
+    /** One line for the startup log: where the key came from, or what is missing. */
+    public static String keyStatus(String apiKey) {
+        String[] found = findKey(apiKey);
+        if (found == null) {
+            return "no Ollama key: set " + KEY_ENV + ", pass it as the 5th argument, "
+                    + "put it in ollama.key, or -Dmcbot.ollama.key=... - chat is disabled";
+        }
+        return "Ollama key found via " + found[1];
+    }
+
+    /** {key, human-readable source}, or null when nothing has it. */
+    private static String[] findKey(String apiKey) {
+        String v = clean(apiKey);
+        if (v != null) return new String[]{v, "the 5th command line argument"};
+        v = clean(System.getenv(KEY_ENV));
+        if (v != null) return new String[]{v, KEY_ENV + " (process environment)"};
+        v = clean(System.getProperty("mcbot.ollama.key"));
+        if (v != null) return new String[]{v, "-Dmcbot.ollama.key"};
+        String[] file = keyFromFile();
+        if (file != null) return file;
+        v = clean(windowsUserEnv(KEY_ENV));
+        if (v != null) return new String[]{v, KEY_ENV + " (Windows user environment)"};
+        return null;
+    }
+
+    /**
+     * Normalises a candidate key: drops a UTF-8 BOM, surrounding whitespace and
+     * one layer of wrapping quotes.
+     *
+     * Every one of these is something a real editor or shell adds. PowerShell
+     * 5.1's {@code Set-Content -Encoding utf8} prepends a BOM and Java's UTF-8
+     * decoder does not strip it, so the raw bytes become part of the bearer
+     * token and the request fails as "invalid header value"; {@code setx} with
+     * quoted text stores the quotes; a file written by hand ends in a newline.
+     */
+    private static String clean(String raw) {
+        if (raw == null) return null;
+        String s = raw;
+        if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
+        s = s.trim();
+        if (s.length() >= 2 && (s.charAt(0) == '"' || s.charAt(0) == '\'')
+                && s.charAt(s.length() - 1) == s.charAt(0)) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s.isEmpty() ? null : s;
+    }
+
+    /**
+     * A key file is the escape hatch for a launcher that cannot pass the value:
+     * no shell quoting, no environment inheritance, no restart of the terminal.
+     */
+    private static String[] keyFromFile() {
+        String prop = System.getProperty(KEY_FILE_PROP);
+        java.util.List<String> paths = new ArrayList<>();
+        if (prop != null && !prop.isEmpty()) paths.add(prop);
+        for (String p : KEY_FILES) paths.add(p);
+        for (String path : paths) {
+            java.io.File f = new java.io.File(path);
+            try {
+                if (!f.isFile()) continue;
+                String v = clean(new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8));
+                if (v != null) return new String[]{v, "the file " + f.getPath()};
+            } catch (Exception ignored) {
+                // unreadable file: keep looking, a later source may still work
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The User-scope environment straight from HKCU\Environment.
+     *
+     * This is the one source that is current even when the process inherited an
+     * environment block from before the variable was set, which is the exact
+     * case that makes a correctly configured key report "chat is disabled".
+     * {@code reg.exe} reads the hive itself, so it sees the new value. Windows
+     * only, and any failure is a miss rather than an error: on Linux the value
+     * arrives through the process environment (systemd EnvironmentFile).
+     */
+    private static String windowsUserEnv(String name) {
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).startsWith("win")) {
+            return null;
+        }
+        Process p = null;
+        try {
+            p = new ProcessBuilder("reg", "query", "HKCU\\Environment", "/v", name)
+                    .redirectErrorStream(true)
+                    .start();
+            String out = new String(p.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) return null;
+            for (String line : out.split("\\R")) {
+                String t = line.trim();
+                if (!t.startsWith(name)) continue;
+                // "OLLAMA_API_KEY    REG_SZ    <value>"
+                String rest = t.substring(name.length()).trim();
+                if (!rest.regionMatches(true, 0, "REG_", 0, 4)) continue;
+                int sp = rest.indexOf(' ');
+                String v = sp < 0 ? "" : rest.substring(sp + 1).trim();
+                if (!v.isEmpty()) return v;
+            }
+        } catch (Throwable ignored) {
+            // no reg.exe, blocked exec, odd locale: not fatal, just no key here
+        } finally {
+            if (p != null && p.isAlive()) p.destroy();
+        }
         return null;
     }
 
@@ -60,7 +193,7 @@ public final class OllamaClient {
             + "\"description\":\"Stop the current mining job. Use this when asked to stop mining or digging.\","
             + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
             + "{\"type\":\"function\",\"function\":{\"name\":\"mine_here\","
-            + "\"description\":\"Mine (break) a block right where the player who messaged you is: the block they are looking at, or the block under their feet. Use this whenever they ask you to mine, dig, or break something nearby or \\\"here\\\" without giving coordinates.\","
+            + "\"description\":\"Break the single block the player is pointing at or standing on, whatever it happens to be. Use this ONLY when they point at a block without naming a material or a count (\\\"this one\\\", \\\"that block\\\"). If they name a material or give a number (\\\"two andesite\\\", \\\"10 stone\\\", \\\"some wood\\\"), call gather_item instead.\","
             + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
             + "{\"type\":\"function\",\"function\":{\"name\":\"look_at_player\","
             + "\"description\":\"Turn your head and look straight at the player who sent the message. Use this when they ask you to look at them, wave at you, or call your name.\","
@@ -73,7 +206,43 @@ public final class OllamaClient {
             + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
             + "{\"type\":\"function\",\"function\":{\"name\":\"use_block\","
             + "\"description\":\"Right-click the block at absolute coordinates: open a crafting table, furnace or chest, or press a button.\","
-            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"z\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\",\"z\"]}}}"
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"z\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\",\"z\"]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"craft_item\","
+            + "\"description\":\"Craft an item by name, gathering and mining the ingredients first if needed. Use this whenever a player asks you to craft, make or build something.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"item\":{\"type\":\"string\",\"description\":\"Item name, e.g. wooden_pickaxe, crafting_table, stick\"},\"count\":{\"type\":\"number\",\"description\":\"How many. Defaults to 1.\"}},\"required\":[\"item\"]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"smelt_item\","
+            + "\"description\":\"Smelt or cook something in a furnace, e.g. raw iron into an iron ingot. Use this when a player asks you to smelt, cook or bake.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"item\":{\"type\":\"string\",\"description\":\"What to smelt, e.g. raw_iron, raw_copper, porkchop\"},\"count\":{\"type\":\"number\",\"description\":\"How many. Defaults to 1.\"}},\"required\":[\"item\"]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"gather_item\","
+            + "\"description\":\"Obtain a named item by whatever means it takes: mine the right block, craft it, smelt what is missing. Use this for ANY request that names a material or an item, even when the player says mine, dig or break - for example \\\"mine 10 stone\\\", \\\"get two andesite\\\", \\\"grab some wood\\\".\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"item\":{\"type\":\"string\",\"description\":\"Item name, e.g. oak_log, cobblestone, iron_ingot\"},\"count\":{\"type\":\"number\",\"description\":\"How many. Defaults to 1.\"}},\"required\":[\"item\"]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"list_inventory\","
+            + "\"description\":\"List what is in your inventory, including the item you are holding. Use this when asked what you have, what you are carrying, or whether you have a certain item.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"follow_player\","
+            + "\"description\":\"Keep following the player who sent the message as they move, instead of just walking to where they were. Use this when they ask you to follow them around.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"eat_food\","
+            + "\"description\":\"Eat the best food you are carrying. Use this when asked to eat, when you are hungry, or before a fight.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"equip_best_armour\","
+            + "\"description\":\"Put on the best armour you own. Use this when asked to gear up, put on armour, or get ready to fight.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"defend\","
+            + "\"description\":\"Equip your best weapon and armour, then attack the nearest threat - a hostile mob first, then a player. Use this when asked to defend, fight, kill something, or protect someone.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"attack_player\","
+            + "\"description\":\"Attack the nearest player. Use this when a player is hitting you, or when asked to fight a person nearby.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"build\","
+            + "\"description\":\"Build a simple structure out of the most plentiful block you carry. Use this when asked to build a wall, a shelter, a house or a floor.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"what\":{\"type\":\"string\",\"description\":\"wall, shelter or platform\"}},\"required\":[\"what\"]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"self_status\","
+            + "\"description\":\"Report your health, hunger, position, gear, inventory and what you are doing. Use this for questions about yourself rather than guessing.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"game_knowledge\","
+            + "\"description\":\"Answer a Minecraft rules question from the game's own data: what a block or mob is, what it drops, how to get an item, what you can craft right now. Use this instead of relying on memory for recipes, drops and stats.\","
+            + "\"parameters\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"The question, e.g. 'where do I get iron' or 'what is obsidian'\"}},\"required\":[\"question\"]}}}"
             + "]";
 
     /** What the model is allowed to do to move/mine. Implemented by the chat pipeline. */
@@ -88,6 +257,18 @@ public final class OllamaClient {
         String scanBlocks(double radius);
         String attackNearest();
         String useBlock(double x, double y, double z);
+        String craftItem(String item, int count);
+        String smeltItem(String item, int count);
+        String gatherItem(String item, int count);
+        String listInventory();
+        String followPlayer();
+        String attackPlayer(String name);
+        String eat();
+        String equipArmour();
+        String defend();
+        String build(String what);
+        String selfStatus();
+        String knowledge(String question);
     }
 
     private static final long REPLY_BUDGET_MS = 45_000;
@@ -99,10 +280,10 @@ public final class OllamaClient {
      * does, the search runs here and the results are fed back so it can answer.
      */
     public static String reply(String apiKey, String botName, List<String[]> history,
-                               Mover mover, java.util.function.Consumer<String> log) {
+                               Mover mover, String state, java.util.function.Consumer<String> log) {
         String key = resolveKey(apiKey);
         if (key == null) {
-            log.accept("no OLLAMA_API_KEY set - chat is disabled");
+            log.accept("no Ollama key - " + keyStatus(null));
             return null;
         }
         String system = "You are " + botName + ", a friendly, knowledgeable Minecraft bot who can chat about anything. "
@@ -112,12 +293,23 @@ public final class OllamaClient {
                 + "block at x y z, and stop_mining to stop mining. "
                 + "You can also look_at_player to turn your head towards whoever is talking to you, scan_blocks to see what resources are "
                 + "around, attack_nearest to fight a hostile mob, and use_block to open a crafting table, furnace or chest at x y z. "
+                + "For items: craft_item makes a named item and gathers or mines the ingredients automatically, smelt_item cooks ore or food, "
+                + "gather_item obtains a named item however it takes, and list_inventory says what you are carrying. follow_player keeps you "
+                + "walking after the player as they move, while come_to_player walks to where they are now. "
+                + "When someone asks you to make, smelt, get or check something, call the matching tool instead of telling them to type a command. "
+                + "For anything about the game itself - what a block is, what a mob drops, where to find an item, what you can craft - call game_knowledge "
+                + "instead of answering from memory; it reads the server's own data and cannot invent a recipe. "
+                + "Use self_status for questions about your own health, hunger, gear or inventory, eat_food when you are hungry or told to eat, "
+                + "equip_best_armour to gear up, defend to fight a mob, and build to put up a wall or a shelter. "
                 + "Call a movement tool whenever a player asks you to come, follow, meet them, go somewhere, or stop - call it "
                 + "right away, do not ask for permission or wait for confirmation. Whenever they ask you to mine, dig, or break something "
                 + "and do not give coordinates, call mine_here right away. Only ask for coordinates if they clearly want a specific faraway block. "
                 + "Do not call a tool for ordinary "
                 + "conversation, questions, or remarks. Never say you cannot pathfind, move, or mine. "
                 + "Call the web_search tool only when you need current or factual information you are not sure about; otherwise just answer. "
+                + "Right now: " + state + ". "
+                + "If someone asks what just happened, whether you felt that hit, or how you are doing, answer from that state. "
+                + "If your health has not dropped, say honestly that you did not feel anything instead of pretending you did. "
                 + "Keep replies concise but natural (max 150 chars).";
 
         StringBuilder msgs = new StringBuilder();
@@ -211,6 +403,65 @@ public final class OllamaClient {
                             log.accept("model asked to use block " + x + " " + y + " " + z);
                             result = mover.useBlock(x, y, z);
                         }
+                    } else if ("craft_item".equals(name) && mover != null) {
+                        String item = args == null ? null : stringField(args, "item");
+                        if (item == null || item.trim().isEmpty()) {
+                            result = "I need the name of the item to craft.";
+                        } else {
+                            int n = countField(args);
+                            log.accept("model asked to craft " + n + "x " + item);
+                            result = mover.craftItem(item.trim(), n);
+                        }
+                    } else if ("smelt_item".equals(name) && mover != null) {
+                        String item = args == null ? null : stringField(args, "item");
+                        if (item == null || item.trim().isEmpty()) {
+                            result = "I need the name of the item to smelt.";
+                        } else {
+                            int n = countField(args);
+                            log.accept("model asked to smelt " + n + "x " + item);
+                            result = mover.smeltItem(item.trim(), n);
+                        }
+                    } else if ("gather_item".equals(name) && mover != null) {
+                        String item = args == null ? null : stringField(args, "item");
+                        if (item == null || item.trim().isEmpty()) {
+                            result = "I need the name of the item to gather.";
+                        } else {
+                            int n = countField(args);
+                            log.accept("model asked to gather " + n + "x " + item);
+                            result = mover.gatherItem(item.trim(), n);
+                        }
+                    } else if ("list_inventory".equals(name) && mover != null) {
+                        log.accept("model asked for the inventory");
+                        result = mover.listInventory();
+                    } else if ("follow_player".equals(name) && mover != null) {
+                        log.accept("model asked to follow the sender");
+                        result = mover.followPlayer();
+                    } else if ("attack_player".equals(name) && mover != null) {
+                        String who = args == null ? null : stringField(args, "name");
+                        log.accept("model asked to attack player: " + who);
+                        result = mover.attackPlayer(who);
+                    } else if ("eat_food".equals(name) && mover != null) {
+                        log.accept("model asked to eat");
+                        result = mover.eat();
+                    } else if ("equip_best_armour".equals(name) && mover != null) {
+                        log.accept("model asked to gear up");
+                        result = mover.equipArmour();
+                    } else if ("defend".equals(name) && mover != null) {
+                        log.accept("model asked to defend");
+                        result = mover.defend();
+                    } else if ("build".equals(name) && mover != null) {
+                        String what = args == null ? null : stringField(args, "what");
+                        log.accept("model asked to build " + what);
+                        result = mover.build(what == null ? "wall" : what.trim());
+                    } else if ("self_status".equals(name) && mover != null) {
+                        log.accept("model asked for its own status");
+                        result = mover.selfStatus();
+                    } else if ("game_knowledge".equals(name) && mover != null) {
+                        String question = args == null ? null : stringField(args, "question");
+                        log.accept("model asked a knowledge question: " + question);
+                        result = question == null || question.isBlank()
+                                ? "Ask me a specific question about a block, item or mob."
+                                : mover.knowledge(question);
                     } else {
                         log.accept("model called unavailable tool: " + name);
                         result = "That tool is not available. Answer in plain chat text.";
@@ -550,6 +801,13 @@ public final class OllamaClient {
         if (q >= json.length() || json.charAt(q) != '"') return null;
         StringBuilder sb = new StringBuilder();
         return readJsonString(json, q, sb) < 0 ? null : sb.toString();
+    }
+
+    /** Tool "count" argument, clamped to something a player could actually hold. */
+    private static int countField(String args) {
+        Double d = args == null ? null : numberField(args, "count");
+        if (d == null || !Double.isFinite(d)) return 1;
+        return (int) Math.max(1, Math.min(64, Math.round(d)));
     }
 
     /** Numeric (or numeric-string) field value, or null when absent/not a number. */

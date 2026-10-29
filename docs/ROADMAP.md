@@ -1,5 +1,10 @@
 # Roadmap
 
+> **Superseded by [TASKS.md](TASKS.md)**, which tracks the current state of every
+> subsystem with evidence. This file is kept for the original reasoning: it
+> explains *why* the order was chosen, and most of its first four items are now
+> done (inventory, recipes, tool selection, drop collection).
+
 The order below is deliberate: each step removes a piece of "the bot doesn't know
 something the client would", which is what blocks everything after it.
 

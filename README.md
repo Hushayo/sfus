@@ -6,14 +6,28 @@ A\* pathfinder, block breaking, block scanning, combat reactions, and a chat AI 
 drive all of it. No Minecraft libraries, no protocol wrappers — just `java.net` and a lot
 of byte parsing.
 
+It also knows the game: every block state, item, recipe, tag and loot table is generated
+from the server's own reports, so "what does stone drop", "where do I get iron" and "can
+you make a diamond pickaxe" are answered from data rather than memory. See
+**[docs/MECHANICS.md](docs/MECHANICS.md)** for the full coverage and
+**[docs/TESTING.md](docs/TESTING.md)** for the 142-test suite.
+
 ```
 src/mcbot/
-  net/     framing, compression, packet reader/writer, packet id table
-  world/   chunk parser, block cache, block categories, block scanner, name table
-  path/    A* over the client-side block cache
-  bot/     connection lifecycle, module list, 20 Hz ticker
-  modules/ movement, mining, gaze, survival, interaction, scanning, crafting, chat AI
-  ai/      Ollama-compatible chat client with tool calling + web search
+  net/        framing, compression, packet reader/writer, packet id table
+  world/      chunk parser, block cache, block categories, block scanner, name table
+  path/       A* over the client-side block cache
+  bot/        connection lifecycle, module list, 20 Hz ticker
+  modules/    movement, mining, gaze, survival, interaction, scanning, crafting,
+              threats, loadout, chat AI
+  registry/   blocks, items, tags, components, entity types, menu layouts
+  knowledge/  drops, food, armour, weapons, mobs, enchantments, damage types
+  crafting/   recipes and the dependency planner
+  inventory/  stacks, window state, slot layouts
+  api/        actions (dig, place, craft, eat, equip, build) and reasoning
+  jobs/       mining, crafting, smelting, one-off actions
+  ai/         Ollama-compatible chat client with tool calling + web search
+  dev/test/   offline test suite (no server needed)
 ```
 
 ## Build
@@ -41,16 +55,55 @@ java -cp out mcbot.Main PathTest 51.195.191.92 10679 ChangeMe123
 
 Arguments: `username`, `host`, `port`, `LoginSecurity password`, `optional Ollama API key`.
 
-The chat model needs a key — pass it as the 5th argument, or set `OLLAMA_API_KEY`, or use
-`-Dmcbot.ollama.key=...`. No key is compiled into the source. Without one, chat and web
-search stay disabled and everything else (movement, mining, scanning, combat, gaze) still
+A dropped connection does not end the process. `Main` rebuilds the bot and
+reconnects with a 2 s / 4 s / 8 s / 16 s / 30 s backoff, and a session that
+lasted a minute resets the backoff so the first retry after a long run is
+immediate. A `sfus.lock` file lock stops a second copy from starting on the same
+account - the server would kick one of them as "already online" and the two would
+fight. `BOT_RECONNECT=0` restores the old one-shot behaviour.
+
+The chat model needs a key. It is looked up in this order, first hit wins:
+
+| # | Source | How |
+| --- | --- | --- |
+| 1 | 5th command line argument | `java -cp out mcbot.Main user host port pass <key>` |
+| 2 | `OLLAMA_API_KEY` | process environment |
+| 3 | `-Dmcbot.ollama.key=...` | JVM system property |
+| 4 | `ollama.key` file | next to the jar, or `data/ollama.key` |
+| 5 | `OLLAMA_API_KEY` in the Windows registry | User scope, `HKCU\Environment` |
+
+Sources 4 and 5 exist because an environment variable is read from the *process*,
+not from wherever it is configured: a bot started from a terminal that was already
+open when the variable was set (`setx`, the Environment Variables dialog) inherits
+the old, empty block and reports **"chat is disabled" while the key is plainly
+set**. The registry entry is read with `reg query`, which sees the new value, so
+that launch works anyway. Start-up logs which source won:
+
+```
+[ai 15:12:32.316] Ollama key found via OLLAMA_API_KEY (Windows user environment)
+[ai 15:12:32.316] no Ollama key: set OLLAMA_API_KEY, pass it as the 5th argument, put it in ollama.key, or -Dmcbot.ollama.key=... - chat is disabled
+```
+
+With no key at all, chat and web search stay disabled and everything else
+(movement, mining, scanning, combat, gaze) still works. A UTF-8 BOM, wrapping
+quotes and trailing newlines are stripped from whatever the key came from, so a
+file written by `Set-Content -Encoding utf8` or a value pasted with quotes still
 works.
 
 | Environment variable | Meaning |
 | --- | --- |
 | `BOT_GOTO` | optional startup path, e.g. `goto -315 64 -275` |
 | `BOT_DEBUG` | log every raw packet id and length (how you find packet ids) |
-| `OLLAMA_API_KEY` | key for the chat model |
+| `BOT_RECONNECT` | `0` disables the reconnect loop (one attempt, then exit) |
+| `OLLAMA_API_KEY` | key for the chat model (see the table above) |
+| `BOT_LOG` | log file; defaults to `logs/bot.log`, truncated per start |
+
+| `BOT_LOG` | where the one log file goes (default `logs/bot.log`) |
+| `BOT_LOG_APPEND` | set to anything to keep history instead of truncating on start |
+
+Everything the bot prints - stdout and stderr - is mirrored into that single
+file, so no launcher and no ad-hoc run has to invent its own `.log`/`.err`. The
+console and the systemd journal still receive the same lines.
 
 ## What the bot does
 
@@ -90,7 +143,7 @@ to a health drop) and decides:
 | Healthy | close the distance, face the target, swing on the vanilla 625 ms cooldown |
 | Health below 14 | after each hit, step back out of reach (kiting = fewer hits land) |
 | Health ≤ 6, or ≤ 10 with no food | disengage, run, eat if food is available |
-| Attacker is a player | never swings unless `-Dmcbot.pvp=true`; flees instead |
+| Attacker is a player | fights back like any other attacker; `-Dmcbot.pvp=false` restores the old "flee" behaviour |
 
 Death stops movement and mining, says so in chat, and hands off to the auto-respawn
 module.
@@ -112,8 +165,12 @@ same for furnaces. `use x y z` right-clicks any block. `container`, `click <slot
 
 This is the plumbing, and it works: block interaction, entity attack, arm swing, hotbar
 selection, container open/close and slot clicks. Recipe logic (which layout makes which
-item, and which slot sequence to click) is **not** implemented yet — see
-[docs/ROADMAP.md](docs/ROADMAP.md).
+item, and which slot sequence to click) now drives CraftJob: a request such as
+"craft me an iron pickaxe" plans the whole ladder - logs into planks and sticks, a
+wooden pickaxe, three stone, a stone pickaxe, three iron ore, a coal for smelting
+fuel, then the ingots and the pickaxe - and runs each step in order, making and
+placing a crafting table or furnace when one is missing. The bot no longer stops at
+"you need planks" when four more are one log away.
 
 **Status of the serverbound ids.** Sending a packet with the wrong id does not fail
 quietly — it gets the bot kicked. That happened once: a guessed `interact` at `0x36` was
@@ -128,6 +185,51 @@ To turn them back on once you have evidence:
 ```
 java -Dmcbot.packet.interact=0x.. -Dmcbot.packet.use_item_on=0x.. ...
 ```
+
+## What the bot knows
+
+Every table is generated from the running server build (`tools/gen_data.py`), not typed
+in: 1,286 blocks / 35,723 states with properties, collision, hardness and tool rules;
+1,658 items with stack size, durability, food, armour, weapon and tool components; 1,681
+recipes of all five types; 296 block tags and 236 item tags; 1,318 block loot tables and
+138 mob loot tables; 44 foods; 38 armour pieces; 42 weapons; 161 entity types classified
+hostile / neutral / passive / boss; 43 enchantments; 51 damage types.
+
+What that buys, concretely:
+
+- **Drops are exact.** Stone yields cobblestone, grass yields dirt, diamond ore yields a
+  diamond, oak leaves guarantee nothing (5% sapling, 2% stick, 0.5% apple). The planner
+  never sends the bot to mine something that drops nothing it wants.
+- **Break times match vanilla.** Stone by hand 7.5 s, stone with a wooden pickaxe 1.15 s,
+  obsidian with diamond 9.4 s — computed from hardness, tool speed and the harvest flag.
+- **Food is chosen, not grabbed.** Nutrition, saturation, eat time and effects decide what
+  to eat and when; vanilla only regenerates at food ≥ 18.
+- **Armour and weapons are valued properly.** The vanilla damage formula (with toughness),
+  the 1.9 attack cooldown, criticals and shields.
+- **Mobs are classified.** A cow is not a threat; an enderman is neutral until hit; a
+  skeleton 12 blocks away outranks a zombie at the same distance.
+- **Questions get real answers.** "Where do I get iron", "what is obsidian", "what can you
+  make right now", "why can't you mine that" are answered from the tables and the live
+  inventory, without a language model.
+
+## Actions
+
+`mcbot.api.Actions` is the verb layer — the part a script or the chat model uses. It
+checks preconditions, acts through the modules, and verifies the result instead of
+assuming the packet worked.
+
+| Action | What it does |
+| --- | --- |
+| `gotoAndWait`, `gotoBlock` | walks and waits for arrival, with a timeout |
+| `dig`, `digBlock`, `collect` | one block, N blocks, or "get me this item however it takes" |
+| `craft`, `smelt` | plans and runs the whole ladder |
+| `equip`, `equipBestArmor`, `equipBestWeapon` | armour by shift-click, tools into the hand |
+| `eat` | best food, real eat time |
+| `drop`, `deposit`, `withdraw` | inventory and container transfers |
+| `attack`, `defend`, `flee` | `defend` gears up first |
+| `place`, `wall`, `platform`, `shelter` | verified placements against a support face |
+| `sleep` | finds a bed and uses it |
+| `selfReport`, `inspect` | what it knows about itself and the world |
 
 ## Chat commands
 
@@ -147,6 +249,15 @@ java -Dmcbot.packet.interact=0x.. -Dmcbot.packet.use_item_on=0x.. ...
 | `furnace [x y z]`, `smelt` | crafting |
 | `use x y z` | interaction |
 | `container`, `click <slot> [button] [type]`, `slot <0-8>`, `close` | interaction |
+| `eat`, `eat something` | survival |
+| `gear up`, `equip <item>`, `wear <item>` | loadout |
+| `defend`, `fight`, `attack`, `kill` | combat |
+| `flee`, `run away`, `retreat` | survival |
+| `build a wall`, `build a shelter`, `build a platform` | building |
+| `sleep`, `go to bed` | interaction |
+| `drop 10 dirt`, `throw away cobblestone` | inventory |
+| `where do I get iron`, `what is obsidian`, `what can you make` | reasoning |
+| `how are you`, `what do you know`, `what should you do` | self knowledge |
 
 Commands are matched anchored, so ordinary sentences ("I will go to the shop later")
 never trigger movement. A pasted `x y z yaw pitch` macro still works: the trailing
@@ -154,10 +265,44 @@ rotation numbers are ignored.
 
 ## AI tools
 
-The chat model can call: `come_to_player`, `walk_to_coordinates`, `stop_walking`,
-`mine_block`, `mine_here`, `stop_mining`, `look_at_player`, `scan_blocks`,
-`attack_nearest`, `use_block`, `web_search`. The deterministic commands above are handled
-before the model ever sees the message.
+The chat model can call 22 tools: `come_to_player`, `walk_to_coordinates`,
+`stop_walking`, `follow_player`, `mine_block`, `mine_here`, `stop_mining`,
+`look_at_player`, `scan_blocks`, `attack_nearest`, `use_block`, `craft_item`,
+`smelt_item`, `gather_item`, `list_inventory`, `eat_food`, `equip_best_armour`,
+`defend`, `build`, `self_status`, `game_knowledge`, `web_search`. The
+deterministic commands above are handled before the model ever sees the message,
+and `game_knowledge` routes questions back into the same reasoning code instead
+of letting the model recall a recipe.
+
+The schema is a 5 KB hand-built JSON string, so a test parses it on every run:
+one missing brace would make every request fail with a 400 the bot never sees.
+
+## Testing
+
+```
+./tools/test.sh
+```
+
+142 tests in 19 suites, no server required: codecs, registries, loot, food,
+armour, combat, mobs, recipes and the planner, inventory parsing and slot
+mapping, physics, pathfinding, fuzzed parsers, a sweep over all 1,658 items and
+all 35,723 block states, the reasoning layer, the AI tool schema, and a full
+login against an in-process protocol-777 server.
+
+See **[docs/TESTING.md](docs/TESTING.md)** for the suite table and the bugs the
+tests caught.
+
+To see the coverage and a few real answers without connecting:
+
+```
+java -cp sfus.jar mcbot.dev.KnowledgeDump
+```
+
+To see the coverage and a few real answers without connecting:
+
+```
+java -cp sfus.jar mcbot.dev.KnowledgeDump
+```
 
 `web_search` uses DuckDuckGo's HTML endpoint and Wikipedia — both free, key-less and
 quota-free. There is deliberately **no paid search fallback**: if both miss, the tool
@@ -190,7 +335,8 @@ carry best-effort ids that can be overridden without recompiling:
 java -Dmcbot.packet.entity_status=0x1D -Dmcbot.packet.interact=0x36 -Dmcbot.packet.use_item_on=0x3A ...
 ```
 
-`java -Dmcbot.pvp=true` enables swinging at players. See `src/mcbot/net/PacketIds.java`
+PvP is **on** by default; `-Dmcbot.pvp=false` turns it off and makes the bot flee
+from players instead of fighting. See `src/mcbot/net/PacketIds.java`
 for the full list, and **[docs/PROTOCOL.md](docs/PROTOCOL.md)** for which ids have real
 captured evidence behind them, which are disproved, and how to re-derive them. If a
 feature silently does nothing, run with `BOT_DEBUG=1` and check which id the server
@@ -203,13 +349,14 @@ throws, the packet just never arrives and the feature built on it silently does
 nothing. `tools/pktstat.py` measures them instead of guessing.
 
 ```bash
-python tools/pktstat.py analyze live2.log --state PLAY   # what the server really sends
-python tools/pktstat.py burst  live2.log --n 24          # join fingerprint
+python tools/pktstat.py analyze logs/bot.log --state PLAY   # what the server really sends
+python tools/pktstat.py burst  logs/bot.log --n 24          # join fingerprint
 python tools/pktstat.py ids                              # what the code claims
 python tools/pktstat.py probe --host 127.0.0.1 --port 25599 --out capture.log
 ```
 
-`analyze` reads the logs the bot already writes with `BOT_DEBUG=1`; `probe`
+`analyze` reads the log the bot already writes with `BOT_DEBUG=1` (`logs/bot.log`
+by default, override with `BOT_LOG`); `probe`
 captures a fresh session. Both join the capture against the ids declared in
 `PacketIds.java` and the modules, so the tool never drifts from the source.
 `tools/fake_server.py` speaks enough of the handshake to exercise either one
@@ -236,11 +383,19 @@ disproved, and what is still a guess.
 ## Limitations
 
 - Offline-mode login only (no encryption / Microsoft auth).
-- No inventory model: the bot cannot see what it is holding, so mining progress is
-  detected by polling the world cache rather than by simulating block hardness.
-- Recipe logic and GUI-aware slot sequences are not implemented (roadmap).
-- Anti-cheat heavy servers may still correct the bot's position; rejected path edges are
-  blacklisted and the route is recomputed around them.
+- Anti-cheat heavy servers may still correct the bot's position; rejected path
+  edges are blacklisted and the route is recomputed around them.
+- The open-packet ids for interactly mining ores far from the bot are a world
+  constraint, not a code one: no ore within the 32-block scan radius means the
+  job stops honestly instead of walking to infinity.
+- Not implemented: enchanting table flow, anvil, brewing, trading, fishing,
+  boats, minecarts, elytra, redstone logic, and anything that persists between
+  restarts (no remembered base or chests).
+- Enchantments on picked-up items are not decoded (the component patch is
+  skipped), so a Sharpness V sword is valued as a plain one.
+- Mob health and melee damage are the one curated table: no data report carries
+  them. A mob missing from it is classified by name and treated as unknown
+  strength.
 
 ## License
 

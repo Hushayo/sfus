@@ -4,6 +4,7 @@
 /sfus.jar
 
 # runtime logs (these grow to tens of megabytes in a session)
+/logs/
 *.log
 *.err
 /aiout*.txt
@@ -28,6 +29,9 @@ __pycache__/
 # local secrets
 .env
 blocks.local.txt
+# OllamaClient reads one of these when the environment cannot be trusted to
+# carry the key; it is a credential, so it must never be committed.
+ollama.key
 
 # assistant workspace data (notes, caches) - never part of the project
 .workbuddy-ai/
